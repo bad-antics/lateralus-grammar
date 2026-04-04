@@ -1,0 +1,268 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// LATERALUS — ai_inference.ltl
+// Local AI inference via Ollama: completions, embeddings, RAG pipeline
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import net
+import json
+import math
+import io
+
+// ─── Ollama client ─────────────────────────────────────────────────────────────
+
+struct OllamaConfig {
+    base_url: str
+    model:    str
+    timeout:  int
+}
+
+fn ollama_default() -> OllamaConfig {
+    return OllamaConfig {
+        base_url: "http://localhost:11434",
+        model:    "llama3",
+        timeout:  120
+    }
+}
+
+struct GenerateResponse {
+    response:      str
+    eval_count:    int
+    prompt_tokens: int
+    elapsed_ms:    int
+    done:          bool
+}
+
+fn ollama_generate(cfg: OllamaConfig, prompt: str, system: str?) -> GenerateResponse {
+    let payload = {
+        "model":  cfg.model,
+        "prompt": prompt,
+        "stream": false,
+        "options": {
+            "num_predict": 512,
+            "temperature": 0.7,
+            "top_p":       0.95
+        }
+    }
+
+    if system != none {
+        payload["system"] = system
+    }
+
+    let body = json.encode(payload)
+    let resp = net.http_post("{cfg.base_url}/api/generate", body, {
+        "Content-Type": "application/json"
+    })
+
+    let parsed = json.decode(resp.body)
+    return GenerateResponse {
+        response:      parsed["response"],
+        eval_count:    int(parsed["eval_count"]),
+        prompt_tokens: int(parsed["prompt_eval_count"]),
+        elapsed_ms:    int(parsed["total_duration"]) / 1000000,
+        done:          parsed["done"]
+    }
+}
+
+// ─── Chat messages ─────────────────────────────────────────────────────────────
+
+enum Role {
+    System
+    User
+    Assistant
+}
+
+struct Message {
+    role:    Role
+    content: str
+}
+
+struct ChatSession {
+    cfg:      OllamaConfig
+    history:  list
+    sys_msg:  str
+}
+
+fn chat_new(cfg: OllamaConfig, system_prompt: str) -> ChatSession {
+    return ChatSession {
+        cfg:     cfg,
+        history: [],
+        sys_msg: system_prompt
+    }
+}
+
+fn chat_send(session: ChatSession, user_msg: str) -> str {
+    push(session.history, Message { role: Role.User, content: user_msg })
+
+    let resp = ollama_generate(session.cfg, user_msg, session.sys_msg)
+    push(session.history, Message { role: Role.Assistant, content: resp.response })
+
+    return resp.response
+}
+
+fn chat_clear(session: ChatSession) {
+    session.history = []
+}
+
+// ─── Embeddings ────────────────────────────────────────────────────────────────
+
+fn ollama_embed(cfg: OllamaConfig, text: str) -> list {
+    let payload = json.encode({ "model": cfg.model, "input": text })
+    let resp    = net.http_post("{cfg.base_url}/api/embed", payload, {
+        "Content-Type": "application/json"
+    })
+    let parsed  = json.decode(resp.body)
+    return parsed["embeddings"][0]
+}
+
+fn cosine_similarity(a: list, b: list) -> float {
+    let dot    = 0.0
+    let norm_a = 0.0
+    let norm_b = 0.0
+    for i in range(len(a)) {
+        let ai  = float(a[i])
+        let bi  = float(b[i])
+        dot     = dot + ai * bi
+        norm_a  = norm_a + ai * ai
+        norm_b  = norm_b + bi * bi
+    }
+    if norm_a == 0.0 or norm_b == 0.0 { return 0.0 }
+    return dot / (sqrt(norm_a) * sqrt(norm_b))
+}
+
+// ─── Vector store (in-memory) ──────────────────────────────────────────────────
+
+struct VectorDoc {
+    id:        int
+    text:      str
+    embedding: list
+    metadata:  map
+}
+
+struct VectorStore {
+    docs: list
+    cfg:  OllamaConfig
+}
+
+fn store_new(cfg: OllamaConfig) -> VectorStore {
+    return VectorStore { docs: [], cfg: cfg }
+}
+
+fn store_add(store: VectorStore, text: str, metadata: map) -> int {
+    let emb = ollama_embed(store.cfg, text)
+    let id  = len(store.docs)
+    push(store.docs, VectorDoc { id: id, text: text, embedding: emb, metadata: metadata })
+    return id
+}
+
+struct SearchResult {
+    doc:   VectorDoc
+    score: float
+}
+
+fn store_search(store: VectorStore, query: str, top_k: int) -> list {
+    let q_emb   = ollama_embed(store.cfg, query)
+    let scored  = []
+
+    for doc in store.docs {
+        let sim = cosine_similarity(q_emb, doc.embedding)
+        push(scored, SearchResult { doc: doc, score: sim })
+    }
+
+    // Sort descending by score
+    let sorted = sort(scored)
+    let result = []
+    for i in range(min(top_k, len(sorted))) {
+        push(result, sorted[len(sorted) - 1 - i])
+    }
+    return result
+}
+
+// ─── RAG pipeline ──────────────────────────────────────────────────────────────
+
+struct RagPipeline {
+    store:   VectorStore
+    session: ChatSession
+    top_k:   int
+}
+
+fn rag_new(cfg: OllamaConfig, system_prompt: str, top_k: int) -> RagPipeline {
+    return RagPipeline {
+        store:   store_new(cfg),
+        session: chat_new(cfg, system_prompt),
+        top_k:   top_k
+    }
+}
+
+fn rag_ingest(rag: RagPipeline, documents: list) {
+    for doc in documents {
+        store_add(rag.store, doc["text"], doc["metadata"])
+    }
+    io.println("Ingested {len(documents)} documents into vector store")
+}
+
+fn rag_query(rag: RagPipeline, user_question: str) -> str {
+    let results = store_search(rag.store, user_question, rag.top_k)
+
+    let context = ""
+    for r in results {
+        context = context + r.doc.text + "\n\n"
+    }
+
+    let augmented_prompt = "Context:\n{context}\n\nQuestion: {user_question}"
+    return chat_send(rag.session, augmented_prompt)
+}
+
+// ─── Prompt templates ──────────────────────────────────────────────────────────
+
+fn template_qa(context: str, question: str) -> str {
+    return "Answer the question based on the context.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer:"
+}
+
+fn template_summarise(text: str, max_words: int) -> str {
+    return "Summarise the following in at most {max_words} words:\n\n{text}"
+}
+
+fn template_code_review(code: str, lang: str) -> str {
+    return "Review the following {lang} code for bugs, style, and performance:\n\n{code}"
+}
+
+fn template_classify(text: str, labels: list) -> str {
+    let label_str = join(labels, ", ")
+    return "Classify the text into one of: [{label_str}]\n\nText: {text}\n\nLabel:"
+}
+
+// ─── Demo ──────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let cfg = ollama_default()
+
+    io.println("Testing Lateralus AI inference module")
+
+    // Basic generation
+    let resp = ollama_generate(cfg, "What is Lateralus?", none)
+    io.println("Response ({resp.eval_count} tokens, {resp.elapsed_ms}ms):")
+    io.println(resp.response)
+
+    // Chat session
+    let chat = chat_new(cfg, "You are a terse technical assistant. Be brief.")
+    let r1 = chat_send(chat, "Name one benefit of static typing.")
+    io.println("Chat: {r1}")
+
+    // RAG pipeline
+    let rag = rag_new(cfg, "Answer based on provided context only.", 3)
+    rag_ingest(rag, [
+        { "text": "Lateralus is a compiled language with a pipeline operator.",
+          "metadata": { "source": "spec.md" } },
+        { "text": "The LateralusOS kernel is written in Lateralus and boots via Multiboot2.",
+          "metadata": { "source": "os_readme.md" } },
+        { "text": "Lateralus supports async/await with the spawn keyword.",
+          "metadata": { "source": "spec.md" } },
+    ])
+
+    let answer = rag_query(rag, "How does LateralusOS boot?")
+    io.println("RAG answer: {answer}")
+
+    // Prompt templates
+    let review_prompt = template_code_review("fn foo(x: int) -> int { return x * x }", "Lateralus")
+    io.println("Code review prompt length: {len(review_prompt)}")
+}

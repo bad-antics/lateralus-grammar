@@ -1,0 +1,224 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// LATERALUS — crypto.ltl
+// Cryptographic utilities: hashing, HMAC, symmetric encryption, key derivation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import crypto
+import encoding
+import io
+
+// ─── Hash functions ────────────────────────────────────────────────────────────
+
+fn hash_sha256(data: str) -> str {
+    return sha256(data)
+}
+
+fn hash_sha512(data: str) -> str {
+    return crypto.sha512(data)
+}
+
+fn hash_md5(data: str) -> str {
+    return crypto.md5(data)
+}
+
+fn hash_file_sha256(path: str) -> str {
+    let data = io.read_file(path)
+    return sha256(data)
+}
+
+// ─── HMAC ──────────────────────────────────────────────────────────────────────
+
+fn hmac_sha256(key: str, msg: str) -> str {
+    return hmac_sign(key, msg)
+}
+
+fn hmac_verify(key: str, msg: str, expected: str) -> bool {
+    let actual = hmac_sign(key, msg)
+    return crypto.constant_time_eq(actual, expected)
+}
+
+// ─── Key derivation ────────────────────────────────────────────────────────────
+
+struct DerivedKey {
+    key:    str
+    salt:   str
+    rounds: int
+}
+
+fn pbkdf2(password: str, salt: str, rounds: int, key_len: int) -> DerivedKey {
+    let key = crypto.pbkdf2_sha256(password, salt, rounds, key_len)
+    return DerivedKey {
+        key:    to_base64(key),
+        salt:   to_base64(salt),
+        rounds: rounds
+    }
+}
+
+fn derive_key(password: str) -> DerivedKey {
+    let salt = crypto.random_bytes(32)
+    return pbkdf2(password, salt, 200000, 32)
+}
+
+// ─── AES-256-GCM encryption ────────────────────────────────────────────────────
+
+struct EncryptedBlob {
+    ciphertext: str
+    iv:         str
+    tag:        str
+    key_id:     str
+}
+
+fn aes_encrypt(plaintext: str, key: str) -> EncryptedBlob {
+    let iv     = crypto.random_bytes(12)
+    let result = crypto.aes256_gcm_encrypt(plaintext, key, iv)
+    return EncryptedBlob {
+        ciphertext: to_base64(result["ciphertext"]),
+        iv:         to_base64(iv),
+        tag:        to_base64(result["tag"]),
+        key_id:     sha256(key)[..8]
+    }
+}
+
+fn aes_decrypt(blob: EncryptedBlob, key: str) -> str {
+    let ct  = from_base64(blob.ciphertext)
+    let iv  = from_base64(blob.iv)
+    let tag = from_base64(blob.tag)
+    return crypto.aes256_gcm_decrypt(ct, key, iv, tag)
+}
+
+// ─── ChaCha20-Poly1305 ─────────────────────────────────────────────────────────
+
+struct ChaChaBlob {
+    ciphertext: str
+    nonce:      str
+    tag:        str
+}
+
+fn chacha_encrypt(plaintext: str, key: str) -> ChaChaBlob {
+    let nonce  = crypto.random_bytes(12)
+    let result = crypto.chacha20_poly1305_encrypt(plaintext, key, nonce)
+    return ChaChaBlob {
+        ciphertext: to_base64(result["ciphertext"]),
+        nonce:      to_base64(nonce),
+        tag:        to_base64(result["tag"])
+    }
+}
+
+fn chacha_decrypt(blob: ChaChaBlob, key: str) -> str {
+    let ct    = from_base64(blob.ciphertext)
+    let nonce = from_base64(blob.nonce)
+    let tag   = from_base64(blob.tag)
+    return crypto.chacha20_poly1305_decrypt(ct, key, nonce, tag)
+}
+
+// ─── Password vault entry ──────────────────────────────────────────────────────
+
+struct VaultEntry {
+    site:     str
+    username: str
+    blob:     EncryptedBlob
+}
+
+struct Vault {
+    entries:    list
+    master_key: str
+}
+
+fn vault_new(master_password: str) -> Vault {
+    let dk = derive_key(master_password)
+    return Vault { entries: [], master_key: dk.key }
+}
+
+fn vault_add(vault: Vault, site: str, username: str, password: str) {
+    let payload = "{site}:{username}:{password}"
+    let blob    = aes_encrypt(payload, vault.master_key)
+    push(vault.entries, VaultEntry { site: site, username: username, blob: blob })
+}
+
+fn vault_get(vault: Vault, site: str) -> str? {
+    for entry in vault.entries {
+        if entry.site == site {
+            let decrypted = aes_decrypt(entry.blob, vault.master_key)
+            let parts     = split(decrypted, ":")
+            return parts[2]
+        }
+    }
+    return none
+}
+
+// ─── Signing ───────────────────────────────────────────────────────────────────
+
+struct KeyPair {
+    public_key:  str
+    private_key: str
+}
+
+fn ed25519_keygen() -> KeyPair {
+    let pair = crypto.ed25519_generate()
+    return KeyPair {
+        public_key:  to_base64(pair["public"]),
+        private_key: to_base64(pair["private"])
+    }
+}
+
+fn ed25519_sign(private_key: str, message: str) -> str {
+    let priv = from_base64(private_key)
+    let sig  = crypto.ed25519_sign(priv, message)
+    return to_base64(sig)
+}
+
+fn ed25519_verify(public_key: str, message: str, signature: str) -> bool {
+    let pub = from_base64(public_key)
+    let sig = from_base64(signature)
+    return crypto.ed25519_verify(pub, message, sig)
+}
+
+// ─── Secure token generation ───────────────────────────────────────────────────
+
+fn generate_token(length: int) -> str {
+    let bytes = crypto.random_bytes(length)
+    return to_base64(bytes)
+}
+
+fn generate_api_key() -> str {
+    let raw = crypto.random_bytes(32)
+    return sha256(raw)[..40]
+}
+
+// ─── Demo ──────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let msg = "Hello, Lateralus!"
+
+    // Hashing
+    let h256 = hash_sha256(msg)
+    io.println("SHA-256: {h256}")
+
+    // HMAC
+    let key  = "super-secret-key"
+    let mac  = hmac_sha256(key, msg)
+    let ok   = hmac_verify(key, msg, mac)
+    io.println("HMAC-SHA256: {mac[..16]}...  valid={ok}")
+
+    // Encrypt/decrypt
+    let enc_key  = sha256("my-encryption-key")
+    let blob     = aes_encrypt(msg, enc_key)
+    let recovered = aes_decrypt(blob, enc_key)
+    io.println("AES-256-GCM roundtrip: {recovered == msg}")
+
+    // Ed25519 signing
+    let kp  = ed25519_keygen()
+    let sig = ed25519_sign(kp.private_key, msg)
+    let ok2 = ed25519_verify(kp.public_key, msg, sig)
+    io.println("Ed25519 sig valid: {ok2}")
+
+    // Password vault
+    let vault = vault_new("my-master-password")
+    vault_add(vault, "github.com", "antics", "hunter2")
+    let pw = vault_get(vault, "github.com")
+    io.println("Vault retrieved: {pw}")
+
+    // Token generation
+    let token = generate_token(32)
+    io.println("Secure token: {token}")
+}

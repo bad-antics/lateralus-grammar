@@ -1,0 +1,271 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// LATERALUS — web_server.ltl
+// Minimal async HTTP/1.1 server with routing, middleware, and JSON responses
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import net
+import io
+import strings
+import json
+
+// ─── HTTP types ────────────────────────────────────────────────────────────────
+
+struct HttpRequest {
+    method:   str
+    path:     str
+    version:  str
+    headers:  map
+    body:     str
+    params:   map
+}
+
+struct HttpResponse {
+    status:   int
+    headers:  map
+    body:     str
+}
+
+fn response_ok(body: str) -> HttpResponse {
+    return HttpResponse {
+        status:  200,
+        headers: { "Content-Type": "application/json", "X-Powered-By": "Lateralus" },
+        body:    body
+    }
+}
+
+fn response_html(html: str) -> HttpResponse {
+    return HttpResponse {
+        status:  200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+        body:    html
+    }
+}
+
+fn response_error(status: int, msg: str) -> HttpResponse {
+    let body = "{\"error\": \"{msg}\"}"
+    return HttpResponse {
+        status:  status,
+        headers: { "Content-Type": "application/json" },
+        body:    body
+    }
+}
+
+fn response_redirect(location: str) -> HttpResponse {
+    return HttpResponse {
+        status:  302,
+        headers: { "Location": location },
+        body:    ""
+    }
+}
+
+// ─── Request parsing ───────────────────────────────────────────────────────────
+
+fn parse_request(raw: str) -> HttpRequest {
+    let lines   = split(raw, "\r\n")
+    let req     = HttpRequest {
+        method:  "", path: "", version: "",
+        headers: {}, body: "", params: {}
+    }
+
+    let in_body = false
+    for i in range(len(lines)) {
+        let line = lines[i]
+        if i == 0 {
+            let parts     = split(line, " ")
+            req.method    = parts[0]
+            req.path      = parts[1]
+            req.version   = parts[2]
+        } else if line == "" {
+            in_body = true
+        } else if in_body {
+            req.body = req.body + line
+        } else {
+            let colon = strings.index_of(line, ":")
+            if colon > 0 {
+                let k          = trim(slice(line, 0, colon))
+                let v          = trim(slice(line, colon + 1, len(line)))
+                req.headers[k] = v
+            }
+        }
+    }
+
+    // Parse query string params
+    if strings.contains(req.path, "?") {
+        let parts  = split(req.path, "?")
+        req.path   = parts[0]
+        let qs     = parts[1]
+        for pair in split(qs, "&") {
+            let kv = split(pair, "=")
+            if len(kv) == 2 {
+                req.params[kv[0]] = kv[1]
+            }
+        }
+    }
+
+    return req
+}
+
+fn format_response(resp: HttpResponse) -> str {
+    let status_texts = {
+        "200": "OK", "201": "Created", "204": "No Content",
+        "301": "Moved Permanently", "302": "Found",
+        "400": "Bad Request", "401": "Unauthorized",
+        "403": "Forbidden", "404": "Not Found",
+        "500": "Internal Server Error"
+    }
+    let status_text = status_texts[str(resp.status)]
+    let out = "HTTP/1.1 {resp.status} {status_text}\r\n"
+    for k in keys(resp.headers) {
+        out = out + "{k}: {resp.headers[k]}\r\n"
+    }
+    out = out + "Content-Length: {len(resp.body)}\r\nConnection: close\r\n\r\n"
+    out = out + resp.body
+    return out
+}
+
+// ─── Router ────────────────────────────────────────────────────────────────────
+
+struct Route {
+    method:  str
+    pattern: str
+    handler: fn
+}
+
+struct Router {
+    routes:      list
+    middlewares: list
+}
+
+fn router_new() -> Router {
+    return Router { routes: [], middlewares: [] }
+}
+
+fn route_get(router: Router, pattern: str, handler: fn) {
+    push(router.routes, Route { method: "GET", pattern: pattern, handler: handler })
+}
+
+fn route_post(router: Router, pattern: str, handler: fn) {
+    push(router.routes, Route { method: "POST", pattern: pattern, handler: handler })
+}
+
+fn use_middleware(router: Router, mw: fn) {
+    push(router.middlewares, mw)
+}
+
+fn match_route(pattern: str, path: str) -> (bool, map) {
+    let params     = {}
+    let pat_parts  = split(pattern, "/")
+    let path_parts = split(path, "/")
+
+    if len(pat_parts) != len(path_parts) { return (false, params) }
+
+    for i in range(len(pat_parts)) {
+        let pp = pat_parts[i]
+        let rp = path_parts[i]
+        if strings.starts_with(pp, ":") {
+            params[slice(pp, 1, len(pp))] = rp
+        } else if pp != rp {
+            return (false, params)
+        }
+    }
+    return (true, params)
+}
+
+fn dispatch(router: Router, req: HttpRequest) -> HttpResponse {
+    // Run middlewares
+    for mw in router.middlewares {
+        mw(req)
+    }
+
+    // Find matching route
+    for route in router.routes {
+        if route.method != req.method { continue }
+        let (matched, params) = match_route(route.pattern, req.path)
+        if matched {
+            req.params = params
+            return route.handler(req)
+        }
+    }
+
+    return response_error(404, "Not Found")
+}
+
+// ─── Middleware examples ───────────────────────────────────────────────────────
+
+fn logging_middleware(req: HttpRequest) {
+    io.println("[REQ] {req.method} {req.path}")
+}
+
+fn cors_middleware(req: HttpRequest) {
+    // CORS headers are added to responses in the handler
+}
+
+// ─── Route handlers ────────────────────────────────────────────────────────────
+
+fn handle_index(req: HttpRequest) -> HttpResponse {
+    return response_html("<html><body><h1>Lateralus Web Server</h1></body></html>")
+}
+
+fn handle_health(req: HttpRequest) -> HttpResponse {
+    let body = "{\"status\": \"ok\", \"server\": \"lateralus\"}"
+    return response_ok(body)
+}
+
+fn handle_echo(req: HttpRequest) -> HttpResponse {
+    let body = "{\"method\": \"{req.method}\", \"path\": \"{req.path}\", \"body\": \"{req.body}\"}"
+    return response_ok(body)
+}
+
+fn handle_greet(req: HttpRequest) -> HttpResponse {
+    let name = req.params["name"]
+    let body = "{\"message\": \"Hello, {name}! Welcome to Lateralus.\"}"
+    return response_ok(body)
+}
+
+// ─── Async server ──────────────────────────────────────────────────────────────
+
+struct Server {
+    host:   str
+    port:   int
+    router: Router
+}
+
+fn server_new(host: str, port: int) -> Server {
+    return Server { host: host, port: port, router: router_new() }
+}
+
+async fn handle_connection(conn: net.Handle, router: Router) {
+    let raw  = await net.async_read(conn, 8192)
+    let req  = parse_request(raw)
+    let resp = dispatch(router, req)
+    let out  = format_response(resp)
+    await net.async_write(conn, out)
+    net.close(conn)
+}
+
+async fn server_run(srv: Server) {
+    let listener = net.tcp_listen(srv.host, srv.port)
+    io.println("Lateralus HTTP server listening on {srv.host}:{srv.port}")
+
+    while true {
+        let conn = await net.async_accept(listener)
+        spawn handle_connection(conn, srv.router)
+    }
+}
+
+// ─── Demo ──────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let srv = server_new("0.0.0.0", 8080)
+
+    use_middleware(srv.router, logging_middleware)
+
+    route_get(srv.router,  "/",              handle_index)
+    route_get(srv.router,  "/health",        handle_health)
+    route_get(srv.router,  "/echo",          handle_echo)
+    route_post(srv.router, "/echo",          handle_echo)
+    route_get(srv.router,  "/greet/:name",   handle_greet)
+
+    io.println("Routes registered: 5")
+    server_run(srv)
+}

@@ -1,0 +1,286 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// LATERALUS — game_engine.ltl
+// Minimal 2D game engine: ECS, physics, rendering pipeline, input
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import math
+import io
+
+// ─── Vector math ───────────────────────────────────────────────────────────────
+
+struct Vec2 {
+    x: float
+    y: float
+}
+
+fn vec2_add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn vec2_scale(v: Vec2, s: float) -> Vec2 {
+    return Vec2 { x: v.x * s, y: v.y * s }
+}
+
+fn vec2_dot(a: Vec2, b: Vec2) -> float {
+    return a.x * b.x + a.y * b.y
+}
+
+fn vec2_len(v: Vec2) -> float {
+    return sqrt(v.x * v.x + v.y * v.y)
+}
+
+fn vec2_norm(v: Vec2) -> Vec2 {
+    let l = vec2_len(v)
+    if l == 0.0 { return Vec2 { x: 0.0, y: 0.0 } }
+    return Vec2 { x: v.x / l, y: v.y / l }
+}
+
+fn vec2_lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
+    return Vec2 { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+}
+
+// ─── AABB collision ────────────────────────────────────────────────────────────
+
+struct Rect {
+    x: float
+    y: float
+    w: float
+    h: float
+}
+
+fn rect_overlaps(a: Rect, b: Rect) -> bool {
+    return a.x < b.x + b.w and
+           a.x + a.w > b.x and
+           a.y < b.y + b.h and
+           a.y + a.h > b.y
+}
+
+fn rect_center(r: Rect) -> Vec2 {
+    return Vec2 { x: r.x + r.w / 2.0, y: r.y + r.h / 2.0 }
+}
+
+// ─── Entity-Component System ───────────────────────────────────────────────────
+
+struct Entity {
+    id:       int
+    active:   bool
+    tags:     list
+}
+
+struct Transform {
+    entity_id: int
+    pos:       Vec2
+    rot:       float
+    scale:     Vec2
+}
+
+struct Velocity {
+    entity_id: int
+    vel:       Vec2
+    drag:      float
+}
+
+struct Collider {
+    entity_id: int
+    bounds:    Rect
+    is_static: bool
+    layer:     int
+}
+
+struct Sprite {
+    entity_id: int
+    texture:   str
+    color:     str
+    visible:   bool
+    z_order:   int
+}
+
+struct World {
+    entities:   list
+    transforms: map
+    velocities: map
+    colliders:  map
+    sprites:    map
+    next_id:    int
+    gravity:    Vec2
+}
+
+fn world_new() -> World {
+    return World {
+        entities:   [],
+        transforms: {},
+        velocities: {},
+        colliders:  {},
+        sprites:    {},
+        next_id:    1,
+        gravity:    Vec2 { x: 0.0, y: 980.0 }
+    }
+}
+
+fn spawn_entity(world: World, tags: list) -> int {
+    let id = world.next_id
+    world.next_id = world.next_id + 1
+    push(world.entities, Entity { id: id, active: true, tags: tags })
+    world.transforms[str(id)] = Transform {
+        entity_id: id,
+        pos:   Vec2 { x: 0.0, y: 0.0 },
+        rot:   0.0,
+        scale: Vec2 { x: 1.0, y: 1.0 }
+    }
+    return id
+}
+
+fn add_velocity(world: World, id: int, vel: Vec2, drag: float) {
+    world.velocities[str(id)] = Velocity { entity_id: id, vel: vel, drag: drag }
+}
+
+fn add_collider(world: World, id: int, w: float, h: float, is_static: bool) {
+    let t = world.transforms[str(id)]
+    world.colliders[str(id)] = Collider {
+        entity_id: id,
+        bounds:    Rect { x: t.pos.x, y: t.pos.y, w: w, h: h },
+        is_static: is_static,
+        layer:     0
+    }
+}
+
+fn add_sprite(world: World, id: int, texture: str, color: str, z: int) {
+    world.sprites[str(id)] = Sprite {
+        entity_id: id,
+        texture:   texture,
+        color:     color,
+        visible:   true,
+        z_order:   z
+    }
+}
+
+// ─── Physics system ────────────────────────────────────────────────────────────
+
+fn physics_step(world: World, dt: float) {
+    for k in keys(world.velocities) {
+        let vel_c = world.velocities[k]
+        let tr    = world.transforms[k]
+
+        // Apply gravity
+        let grav_force = vec2_scale(world.gravity, dt)
+        vel_c.vel      = vec2_add(vel_c.vel, grav_force)
+
+        // Apply drag
+        vel_c.vel = vec2_scale(vel_c.vel, 1.0 - vel_c.drag * dt)
+
+        // Integrate position
+        let delta = vec2_scale(vel_c.vel, dt)
+        tr.pos    = vec2_add(tr.pos, delta)
+
+        // Sync collider bounds
+        if contains(keys(world.colliders), k) {
+            let col  = world.colliders[k]
+            col.bounds.x = tr.pos.x
+            col.bounds.y = tr.pos.y
+        }
+    }
+}
+
+// ─── Collision system ──────────────────────────────────────────────────────────
+
+struct Collision {
+    a_id: int
+    b_id: int
+    mtv:  Vec2
+}
+
+fn detect_collisions(world: World) -> list {
+    let hits      = []
+    let col_keys  = keys(world.colliders)
+
+    for i in range(len(col_keys)) {
+        for j in range(i + 1, len(col_keys)) {
+            let ca = world.colliders[col_keys[i]]
+            let cb = world.colliders[col_keys[j]]
+            if ca.is_static and cb.is_static { continue }
+            if rect_overlaps(ca.bounds, cb.bounds) {
+                push(hits, Collision { a_id: ca.entity_id, b_id: cb.entity_id,
+                                       mtv: Vec2 { x: 0.0, y: 0.0 } })
+            }
+        }
+    }
+    return hits
+}
+
+// ─── Render system ─────────────────────────────────────────────────────────────
+
+struct RenderCommand {
+    texture: str
+    pos:     Vec2
+    color:   str
+    z:       int
+}
+
+fn gather_render_commands(world: World) -> list {
+    let cmds = []
+    for k in keys(world.sprites) {
+        let spr = world.sprites[k]
+        if !spr.visible { continue }
+        let tr = world.transforms[k]
+        push(cmds, RenderCommand {
+            texture: spr.texture,
+            pos:     tr.pos,
+            color:   spr.color,
+            z:       spr.z_order
+        })
+    }
+    // Sort by z-order
+    return sort(cmds)
+}
+
+// ─── Game loop ─────────────────────────────────────────────────────────────────
+
+fn game_loop(world: World, max_ticks: int) {
+    let tick     = 0
+    let dt       = 0.016  // 60 fps
+    let running  = true
+
+    while running and tick < max_ticks {
+        physics_step(world, dt)
+        let collisions = detect_collisions(world)
+
+        for col in collisions {
+            io.println("Collision: entity {col.a_id} <-> entity {col.b_id}")
+        }
+
+        let cmds = gather_render_commands(world)
+        // In a real engine, cmds would be submitted to a graphics backend
+        tick = tick + 1
+    }
+
+    io.println("Simulation ran {tick} ticks")
+}
+
+// ─── Demo ──────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let world = world_new()
+
+    // Spawn player
+    let player = spawn_entity(world, ["player", "character"])
+    world.transforms[str(player)].pos = Vec2 { x: 100.0, y: 50.0 }
+    add_velocity(world, player, Vec2 { x: 50.0, y: 0.0 }, 0.05)
+    add_collider(world, player, 32.0, 64.0, false)
+    add_sprite(world, player, "player.png", "#00FF41", 1)
+
+    // Spawn ground
+    let ground = spawn_entity(world, ["ground", "static"])
+    world.transforms[str(ground)].pos = Vec2 { x: 0.0, y: 500.0 }
+    add_collider(world, ground, 800.0, 20.0, true)
+    add_sprite(world, ground, "ground.png", "#333333", 0)
+
+    // Spawn enemy
+    let enemy = spawn_entity(world, ["enemy"])
+    world.transforms[str(enemy)].pos = Vec2 { x: 400.0, y: 50.0 }
+    add_velocity(world, enemy, Vec2 { x: -30.0, y: 0.0 }, 0.02)
+    add_collider(world, enemy, 32.0, 32.0, false)
+    add_sprite(world, enemy, "enemy.png", "#FF0055", 1)
+
+    io.println("World initialized: 3 entities")
+    game_loop(world, 60)
+}
