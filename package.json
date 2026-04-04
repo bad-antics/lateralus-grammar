@@ -1,0 +1,27 @@
+{
+  "name": "lateralus-grammar",
+  "version": "2.4.0",
+  "description": "TextMate grammars for the Lateralus programming language",
+  "keywords": [
+    "lateralus",
+    "grammar",
+    "textmate",
+    "syntax-highlighting",
+    "language",
+    "pipeline"
+  ],
+  "main": "index.js",
+  "files": [
+    "grammars/",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "bad-antics",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bad-antics/lateralus-grammar.git"
+  },
+  "homepage": "https://github.com/bad-antics/lateralus-grammar"
+}
