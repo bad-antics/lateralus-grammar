@@ -1,0 +1,52 @@
+// Generics — parametric polymorphism in Lateralus
+
+struct Stack<T> {
+    items: [T],
+    capacity: u32,
+}
+
+impl<T> Stack<T> {
+    fn new(capacity: u32) -> Stack<T> {
+        Stack { items: [], capacity }
+    }
+
+    fn push(mut self, item: T) -> Result<(), str> {
+        if self.items.len() >= self.capacity {
+            return Err("Stack overflow")
+        }
+        self.items.push(item)
+        Ok(())
+    }
+
+    fn pop(mut self) -> Option<T> {
+        self.items.pop()
+    }
+
+    fn peek(self) -> Option<&T> {
+        self.items.last()
+    }
+
+    fn map<U>(self, f: fn(T) -> U) -> Stack<U> {
+        let mapped = self.items |> map(f) |> collect
+        Stack { items: mapped, capacity: self.capacity }
+    }
+}
+
+trait Summable {
+    fn zero() -> Self
+    fn add(self, other: Self) -> Self
+}
+
+fn sum_all<T: Summable>(items: [T]) -> T {
+    items |> fold(T::zero(), |acc, x| acc.add(x))
+}
+
+fn main() {
+    let stack = Stack::new(10)
+    stack.push(1)?
+    stack.push(2)?
+    stack.push(3)?
+
+    let doubled = stack.map(|x| x * 2)
+    doubled.items |> each(|x| println("{x}"))
+}

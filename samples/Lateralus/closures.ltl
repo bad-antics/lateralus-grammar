@@ -1,0 +1,57 @@
+// Closures — first-class functions and captures
+
+fn make_counter(start: i64) -> fn() -> i64 {
+    let mut count = start
+    return || {
+        count += 1
+        count
+    }
+}
+
+fn apply_twice<T>(value: T, f: fn(T) -> T) -> T {
+    value |> f |> f
+}
+
+fn compose<A, B, C>(f: fn(A) -> B, g: fn(B) -> C) -> fn(A) -> C {
+    |x| x |> f |> g
+}
+
+struct EventBus {
+    listeners: [(str, fn(str))],
+}
+
+impl EventBus {
+    fn new() -> EventBus {
+        EventBus { listeners: [] }
+    }
+
+    fn on(mut self, event: str, handler: fn(str)) {
+        self.listeners.push((event, handler))
+    }
+
+    fn emit(self, event: str, data: str) {
+        self.listeners
+            |> filter(|(name, _)| name == event)
+            |> each(|(_, handler)| handler(data))
+    }
+}
+
+fn main() {
+    let counter = make_counter(0)
+    println("Count: {counter()}")  // 1
+    println("Count: {counter()}")  // 2
+
+    let result = apply_twice(3, |x| x * x)
+    println("3 squared twice: {result}")  // 81
+
+    let parse_and_double = compose(
+        |s: str| s |> parse_int |> unwrap_or(0),
+        |n: i64| n * 2,
+    )
+    println("Result: {parse_and_double(\"21\")}")  // 42
+
+    let mut bus = EventBus::new()
+    bus.on("click", |data| println("Clicked: {data}"))
+    bus.on("click", |data| println("Logged: {data}"))
+    bus.emit("click", "button_submit")
+}

@@ -1,0 +1,78 @@
+// Pattern Matching — exhaustive match with destructuring
+
+enum Shape {
+    Circle { radius: f64 },
+    Rectangle { width: f64, height: f64 },
+    Triangle { a: f64, b: f64, c: f64 },
+    Point,
+}
+
+fn area(shape: Shape) -> f64 {
+    match shape {
+        Shape::Circle { radius } => 3.14159 * radius * radius,
+        Shape::Rectangle { width, height } => width * height,
+        Shape::Triangle { a, b, c } => {
+            let s = (a + b + c) / 2.0
+            (s * (s - a) * (s - b) * (s - c)) |> sqrt
+        },
+        Shape::Point => 0.0,
+    }
+}
+
+fn describe(shape: Shape) -> str {
+    match shape {
+        Shape::Circle { radius } if radius > 100.0 => "Large circle",
+        Shape::Circle { radius } if radius > 10.0 => "Medium circle",
+        Shape::Circle { .. } => "Small circle",
+        Shape::Rectangle { width, height } if width == height => "Square ({width}x{height})",
+        Shape::Rectangle { width, height } => "Rectangle ({width}x{height})",
+        Shape::Triangle { a, b, c } if a == b && b == c => "Equilateral triangle",
+        Shape::Triangle { a, b, .. } if a == b => "Isosceles triangle",
+        Shape::Triangle { .. } => "Scalene triangle",
+        Shape::Point => "Point",
+    }
+}
+
+enum Json {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(str),
+    Array([Json]),
+    Object([(str, Json)]),
+}
+
+fn json_to_string(value: Json, indent: u32) -> str {
+    let pad = " ".repeat(indent * 2)
+    match value {
+        Json::Null => "null",
+        Json::Bool(b) => if b { "true" } else { "false" },
+        Json::Number(n) => "{n}",
+        Json::String(s) => "\"{s}\"",
+        Json::Array(items) => {
+            let inner = items
+                |> map(|item| "{pad}  {json_to_string(item, indent + 1)}")
+                |> join(",\n")
+            "[\n{inner}\n{pad}]"
+        },
+        Json::Object(entries) => {
+            let inner = entries
+                |> map(|(k, v)| "{pad}  \"{k}\": {json_to_string(v, indent + 1)}")
+                |> join(",\n")
+            "{\n{inner}\n{pad}}"
+        },
+    }
+}
+
+fn main() {
+    let shapes = [
+        Shape::Circle { radius: 5.0 },
+        Shape::Rectangle { width: 10.0, height: 10.0 },
+        Shape::Triangle { a: 3.0, b: 4.0, c: 5.0 },
+        Shape::Point,
+    ]
+
+    shapes
+        |> map(|s| (describe(s), area(s)))
+        |> each(|(desc, a)| println("{desc}: area = {a:.2}"))
+}

@@ -1,0 +1,86 @@
+// Error Handling — try/recover/ensure pattern
+
+enum AppError {
+    NotFound(str),
+    ParseError { line: u32, message: str },
+    IoError(str),
+    Timeout { after_ms: u64 },
+}
+
+impl AppError {
+    fn message(self) -> str {
+        match self {
+            AppError::NotFound(name) => "Not found: {name}",
+            AppError::ParseError { line, message } => "Parse error at line {line}: {message}",
+            AppError::IoError(msg) => "IO error: {msg}",
+            AppError::Timeout { after_ms } => "Timed out after {after_ms}ms",
+        }
+    }
+}
+
+fn read_config(path: str) -> Result<Config, AppError> {
+    let content = try {
+        fs::read_to_string(path)
+    } recover err {
+        return Err(AppError::IoError("{err}"))
+    }
+
+    let parsed = try {
+        content |> parse_toml
+    } recover err {
+        return Err(AppError::ParseError { line: err.line, message: err.msg })
+    }
+
+    Ok(parsed)
+}
+
+fn fetch_with_retry(url: str, max_retries: u32) -> Result<str, AppError> {
+    let mut last_error = AppError::IoError("No attempts made")
+
+    (0..max_retries) |> find_map(|attempt| {
+        try {
+            let response = http::get(url)?
+            if response.status != 200 {
+                return None
+            }
+            Some(Ok(response.body))
+        } recover err {
+            last_error = AppError::IoError("{err}")
+            println("Attempt {attempt + 1} failed: {err}")
+            None
+        }
+    }) |> unwrap_or(Err(last_error))
+}
+
+fn process_batch(items: [str]) -> [(str, Result<i64, AppError>)] {
+    items
+        |> map(|item| {
+            let result = try {
+                item |> parse_int |> ok_or(AppError::ParseError {
+                    line: 0,
+                    message: "Invalid integer: {item}",
+                })?
+            } recover err {
+                Err(AppError::ParseError { line: 0, message: "{err}" })
+            }
+            (item, result)
+        })
+        |> collect
+}
+
+fn main() {
+    let config = try {
+        read_config("app.toml")?
+    } recover err {
+        println("Warning: {err.message()}, using defaults")
+        Config::default()
+    } ensure {
+        println("Config loading complete")
+    }
+
+    let data = fetch_with_retry("https://api.example.com/data", 3)
+    match data {
+        Ok(body) => println("Got: {body}"),
+        Err(e) => println("Failed: {e.message()}"),
+    }
+}
